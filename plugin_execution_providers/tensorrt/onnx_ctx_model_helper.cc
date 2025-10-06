@@ -166,24 +166,25 @@ bool EPContextNodeReader::GraphHasCtxNode(const OrtGraph* graph, const OrtApi& o
 /*
  * The sanity check for EP context contrib op.
  */
-bool EPContextNodeReader::ValidateEPCtxNode(const OrtGraph* graph) const {
+OrtStatus* EPContextNodeReader::ValidateEPCtxNode(const OrtGraph* graph) const {
   size_t num_nodes = 0;
   THROW_IF_ERROR(ort_api.Graph_GetNumNodes(graph, &num_nodes));
-  ENFORCE(num_nodes == 1);
+  RETURN_IF_NOT(num_nodes == 1, "Graph contains more than one node.");
 
   std::vector<const OrtNode*> nodes(num_nodes);
   RETURN_IF_ERROR(ort_api.Graph_GetNodes(graph, nodes.data(), nodes.size()));
 
   const char* op_type = nullptr;
   RETURN_IF_ERROR(ort_api.Node_GetOperatorType(nodes[0], &op_type));
-  ENFORCE(std::string(op_type) == "EPContext");
+  RETURN_IF_NOT(std::string(op_type) == "EPContext", "Node is not an EPContext node.");
 
   // TODO: Check compute capability and others
-  return true;
+
+  return nullptr;
 }
 
 OrtStatus* EPContextNodeReader::GetEpContextFromGraph(const OrtGraph& graph) {
-  if (!ValidateEPCtxNode(&graph)) {
+  if (ValidateEPCtxNode(&graph) != nullptr) {
     return ort_api.CreateStatus(ORT_EP_FAIL, "It's not a valid EPContext node");
   }
 
@@ -200,11 +201,7 @@ OrtStatus* EPContextNodeReader::GetEpContextFromGraph(const OrtGraph& graph) {
 
   // Get "embed_mode" attribute
   RETURN_IF_ORT_STATUS_ERROR(node.GetAttributeByName("embed_mode", node_attr));
-  try {
-    ENFORCE(node_attr.GetType() == OrtOpAttrType::ORT_OP_ATTR_INT);
-  } catch (const Ort::Exception& e) {
-    return ort_api.CreateStatus(ORT_EP_FAIL, e.what());
-  }
+  RETURN_IF_NOT(node_attr.GetType() == OrtOpAttrType::ORT_OP_ATTR_INT, "\'embed_mode\' attribute should be integer type.");
 
   int64_t embed_mode = 0;
   RETURN_IF_ORT_STATUS_ERROR(node_attr.GetValue(embed_mode));
@@ -215,11 +212,7 @@ OrtStatus* EPContextNodeReader::GetEpContextFromGraph(const OrtGraph& graph) {
   if (embed_mode) {
     // Get engine from byte stream.
     RETURN_IF_ORT_STATUS_ERROR(node.GetAttributeByName("ep_cache_context", node_attr));
-    try {
-      ENFORCE(node_attr.GetType() == OrtOpAttrType::ORT_OP_ATTR_STRING);
-    } catch (const Ort::Exception& e) {
-      return ort_api.CreateStatus(ORT_EP_FAIL, e.what());
-    }
+    RETURN_IF_NOT(node_attr.GetType() == OrtOpAttrType::ORT_OP_ATTR_STRING, "\'ep_cache_context\' attribute should be string type.");
 
     std::string context_binary;
     RETURN_IF_ORT_STATUS_ERROR(node_attr.GetValue<std::string>(context_binary));
@@ -237,37 +230,26 @@ OrtStatus* EPContextNodeReader::GetEpContextFromGraph(const OrtGraph& graph) {
 
     if (weight_stripped_engine_refit_) {
       RETURN_IF_ORT_STATUS_ERROR(node.GetAttributeByName("onnx_model_filename", node_attr));
-      try {
-        ENFORCE(node_attr.GetType() == OrtOpAttrType::ORT_OP_ATTR_STRING);
-      } catch (const Ort::Exception& e) {
-        return ort_api.CreateStatus(ORT_EP_FAIL, e.what());
-      }
+      RETURN_IF_NOT(node_attr.GetType() == OrtOpAttrType::ORT_OP_ATTR_STRING, "\'onnx_model_filename\' attribute should be string type.");
       std::string onnx_model_filename;
       RETURN_IF_ORT_STATUS_ERROR(node_attr.GetValue<std::string>(onnx_model_filename));
       std::string placeholder;
-      auto status = ep_.RefitEngine(onnx_model_filename,
-                                    onnx_model_folder_path_,
-                                    placeholder,
-                                    make_secure_path_checks,
-                                    onnx_model_bytestream_,
-                                    onnx_model_bytestream_size_,
-                                    onnx_external_data_bytestream_,
-                                    onnx_external_data_bytestream_size_,
-                                    (*trt_engine_).get(),
-                                    false,  // serialize refitted engine to disk
-                                    detailed_build_log_);
-      if (status != nullptr) {
-        return ort_api.CreateStatus(ORT_EP_FAIL, "RefitEngine failed.");
-      }
+      RETURN_IF_ERROR(ep_.RefitEngine(onnx_model_filename,
+                                      onnx_model_folder_path_,
+                                      placeholder,
+                                      make_secure_path_checks,
+                                      onnx_model_bytestream_,
+                                      onnx_model_bytestream_size_,
+                                      onnx_external_data_bytestream_,
+                                      onnx_external_data_bytestream_size_,
+                                      (*trt_engine_).get(),
+                                      false,  // serialize refitted engine to disk
+                                      detailed_build_log_));
     }
   } else {
     // Get engine from cache file.
     RETURN_IF_ORT_STATUS_ERROR(node.GetAttributeByName("ep_cache_context", node_attr));
-    try {
-      ENFORCE(node_attr.GetType() == OrtOpAttrType::ORT_OP_ATTR_STRING);
-    } catch (const Ort::Exception& e) {
-      return ort_api.CreateStatus(ORT_EP_FAIL, e.what());
-    }
+    RETURN_IF_NOT(node_attr.GetType() == OrtOpAttrType::ORT_OP_ATTR_STRING, "\'ep_cache_context\' attribute should be string type.");
     std::string cache_path;
     RETURN_IF_ORT_STATUS_ERROR(node_attr.GetValue<std::string>(cache_path));
 
@@ -336,11 +318,7 @@ OrtStatus* EPContextNodeReader::GetEpContextFromGraph(const OrtGraph& graph) {
 
     if (weight_stripped_engine_refit_) {
       RETURN_IF_ORT_STATUS_ERROR(node.GetAttributeByName("onnx_model_filename", node_attr));
-      try {
-        ENFORCE(node_attr.GetType() == OrtOpAttrType::ORT_OP_ATTR_STRING);
-      } catch (const Ort::Exception& e) {
-        return ort_api.CreateStatus(ORT_EP_FAIL, e.what());
-      }
+      RETURN_IF_NOT(node_attr.GetType() == OrtOpAttrType::ORT_OP_ATTR_STRING, "\'onnx_model_filename\' attribute should be string type.");
       std::string onnx_model_filename;
       RETURN_IF_ORT_STATUS_ERROR(node_attr.GetValue<std::string>(onnx_model_filename));
       std::string weight_stripped_engine_cache = engine_cache_path.string();

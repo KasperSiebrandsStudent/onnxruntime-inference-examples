@@ -19,8 +19,6 @@ struct CUDAAllocator : OrtAllocator {
     OrtAllocator::GetStats = nullptr;
     OrtAllocator::AllocOnStream = nullptr;  // Allocate memory, handling usage across different Streams. Not used for TRT EP.
   }
-  // TODO: Handle destructor
-  //~CUDAAllocator();
 
   void* Alloc(size_t size);
   void Free(void* p);
@@ -48,8 +46,6 @@ struct CUDAPinnedAllocator : OrtAllocator {
     OrtAllocator::GetStats = nullptr;
     OrtAllocator::AllocOnStream = nullptr;
   }
-  // TODO: Handle destructor
-  //~CUDAPinnedAllocator();
 
   void* Alloc(size_t size);
   void Free(void* p);

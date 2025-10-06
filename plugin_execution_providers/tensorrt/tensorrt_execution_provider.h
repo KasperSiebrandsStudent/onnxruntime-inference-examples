@@ -74,17 +74,8 @@ class TensorrtLogger : public nvinfer1::ILogger {
 
 namespace tensorrt_ptr {
 
-struct TensorrtInferDeleter {
-  template <typename T>
-  void operator()(T* obj) const {
-    if (obj) {
-      delete obj;
-    }
-  }
-};
-
 template <typename T>
-using unique_pointer = std::unique_ptr<T, TensorrtInferDeleter>;
+using unique_pointer = std::unique_ptr<T, std::default_delete<T>>;
 };  // namespace tensorrt_ptr
 
 class OutputAllocator : public nvinfer1::IOutputAllocator {

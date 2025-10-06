@@ -964,7 +964,7 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
         const OrtGraph* subgraph_raw_pointer = subgraph;
         if (subgraph_raw_pointer != graph) {
           size_t num_subgraph_nodes = 0;
-          THROW_IF_ERROR(ort_api.Graph_GetNumNodes(subgraph, &num_subgraph_nodes));
+          RETURN_IF_ERROR(ort_api.Graph_GetNumNodes(subgraph, &num_subgraph_nodes));
 
           // Another subgraph of "If" control flow op has no nodes.
           // In this case, TRT EP should consider this empty subgraph is fully supported by TRT.
@@ -2428,12 +2428,11 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
   CreateSyncStreamForDevice = CreateSyncStreamForDeviceImpl;
 
   // Initialize the execution provider.
-  auto ort_status = ort_api.Logger_LogMessage(&logger_,
-                                              OrtLoggingLevel::ORT_LOGGING_LEVEL_INFO,
-                                              ("Plugin EP has been created with name " + name_).c_str(),
-                                              ORT_FILE, __LINE__, __FUNCTION__);
-  // ignore status for now
-  (void)ort_status;
+
+  Ort::Status ort_status(ort_api.Logger_LogMessage(&logger_,
+                                                   OrtLoggingLevel::ORT_LOGGING_LEVEL_INFO,
+                                                   ("Plugin EP has been created with name " + name_).c_str(),
+                                                   ORT_FILE, __LINE__, __FUNCTION__));
 
   // populate apis as global for utility functions
   g_ort_api = &ort_api;

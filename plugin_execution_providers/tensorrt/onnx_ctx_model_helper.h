@@ -75,7 +75,7 @@ class EPContextNodeReader : public ApiPtrs {
 
   static bool GraphHasCtxNode(const OrtGraph* graph, const OrtApi& ort_api);
 
-  bool ValidateEPCtxNode(const OrtGraph* graph) const;
+  OrtStatus* ValidateEPCtxNode(const OrtGraph* graph) const;
 
   OrtStatus* GetEpContextFromGraph(const OrtGraph& graph);
 

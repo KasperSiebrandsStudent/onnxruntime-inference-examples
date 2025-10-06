@@ -27,7 +27,6 @@ endif()
 
 add_definitions(-DONNX_NAMESPACE=onnx)
 add_definitions(-DONNX_ML)
-add_definitions(-DNV_TENSORRT_MAJOR=10)
 add_definitions(-DNOMINMAX)
 file(GLOB tensorrt_src "./*.cc" "./utils/*.cc" "./cuda/unary_elementwise_ops_impl.cu" "./*.h")
 add_library(TensorRTEp SHARED ${tensorrt_src})
