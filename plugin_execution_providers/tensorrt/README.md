@@ -1,7 +1,7 @@
 # Plugin TensorRT EP
 
 This repo contains:
-- the plugin TRT EP implementation
+- The plugin TRT EP implementation
 - How to build plugin TRT EP
 - How to build python wheel for plugin TRT EP
 
@@ -35,3 +35,4 @@ C:/folder/to/ort
       |          ...
 ```
 ## How to build python wheel (on Windows) ##
+setup.py bdist_wheel
