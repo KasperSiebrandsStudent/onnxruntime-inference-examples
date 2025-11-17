@@ -17,9 +17,18 @@ cmake -S ../ -B ./ -DCMAKE_BUILD_TYPE=Debug -DTENSORRT_HOME=C:/folder/to/trt -DO
 ````bash
 cmake --build ./ --config Debug
 `````
+
+If the build succeeds, you will see the TRT EP DLL being generated at:
+```
+C:\repos\onnxruntime-inference-examples\plugin_execution_providers\tensorrt\build> ls .\Debug
+
+TensorRTEp.dll
+```
+
+
 Note: The `ORT_HOME` should contain the `include` and `lib` folder as below
 ```
-C:/folder/to/ort
+C:\folder\to\ort
       |
       | ----- lib
       |          | ----- onnxruntime.dll
@@ -35,4 +44,12 @@ C:/folder/to/ort
       |          ...
 ```
 ## How to build python wheel (on Windows) ##
+```
 setup.py bdist_wheel
+```
+Once it's done, you will see the wheel file at:
+```
+C:\repos\onnxruntime-inference-examples\plugin_execution_providers\tensorrt> ls .\dist
+
+plugin_trt_ep-0.1.0-cp312-cp312-win_amd64.whl
+```
