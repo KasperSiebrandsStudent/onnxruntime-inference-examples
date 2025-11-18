@@ -822,19 +822,6 @@ SubGraphCollection_t TensorrtExecutionProvider::GetSupportedList(SubGraphCollect
   iterations++;
   auto ort_graph = Ort::ConstGraph(graph);
 
-  // Sort OrtGraph with a custom Kahn's topological sorting algorithm.
-  std::vector<size_t> node_index;
-  THROW_IF_ERROR(KahnsTopologicalSort(
-      *ort_graph,
-      [&](const OrtNode* node) {
-        size_t node_id = 0;
-        Ort::Status status(Ort::GetApi().Node_GetId(node, &node_id));
-        ENFORCE(status.IsOK());
-
-        node_index.push_back(node_id);
-      },
-      PriorityNodeCompare()));
-
   for (const auto& group : nodes_vector_input) {
     // Construct subgraph
     if (!group.first.empty()) {
@@ -846,7 +833,7 @@ SubGraphCollection_t TensorrtExecutionProvider::GetSupportedList(SubGraphCollect
         std::vector<Ort::ConstNode> selected_nodes(group.first.size());
         size_t i = 0;
         for (const auto& index : group.first) {
-          selected_nodes[i++] = nodes[node_index[index]];
+          selected_nodes[i++] = nodes[index];
         }
 
         Ort::Graph sub_graph = ort_graph.GetGraphView(selected_nodes);
@@ -932,50 +919,12 @@ SubGraphCollection_t TensorrtExecutionProvider::GetSupportedList(SubGraphCollect
         trt_parser->supportsModel(string_buf.data(), string_buf.size(), parser_nodes_list, model_path_);
 #endif  // (NV_TENSORRT_MAJOR == 10 && NV_TENSORRT_MINOR > 1) || NV_TENSORRT_MAJOR > 10
 
-
-        std::vector<size_t> sub_graph_node_index;
-        THROW_IF_ERROR(KahnsTopologicalSort(
-            *sub_graph,
-            [&](const OrtNode* node) {
-              size_t node_id = 0;
-              Ort::Status status(Ort::GetApi().Node_GetId(node, &node_id));
-              ENFORCE(status.IsOK());
-
-              sub_graph_node_index.push_back(node_id);
-            },
-            PriorityNodeCompare()));
-
         SubGraphCollection_t next_nodes_list =
             GetSupportedList(parser_nodes_list, iterations, max_iterations, sub_graph, early_termination);
 
         for (size_t i = 0, end = next_nodes_list.size(); i < end; ++i) {
           for (size_t j = 0, end = next_nodes_list[i].first.size(); j < end; ++j) {
-            /*
-             * Convert the supported node list returning from onnx-tensorrt parser to the node list recognized by ORT
-             * TRT.
-             *
-             * TRT EP reconstructs the graph based on the nodes in group.first and feeds this graph (converts to model
-             * proto and to string buffer) to onnx-tensorrt parser. The node index in the list returning from
-             * onnx-tensorrt parser might not be the same as the node index in group.first. Therefore, TRT EP needs a
-             * node index mapping table here.
-             *
-             * The order of iterating the nodes in group.first and calling graph_build.AddNode() determines the node
-             * order in the newly constructed graph (see Graph::AllocateNode() in graph.cc), however, once the graph is
-             * converted to model proto, the node proto order in model proto (ex: onnx-tensorrt calls
-             * model.graph().node() to iterate NodeProto in ModelProto) is decided by topo sort.
-             *
-             * The topo sort list (i.e. subgraph_node_index) acts as the node index mapping table:
-             * sub_graph_node_index[node index from onnx-tensorrt parser] = index in group.first
-             *
-             * In the past, TRT EP uses ORT's default reversed DFS topo sort which might end up with the sorting result
-             * not sequence of 0, 1, ... n-1, ex: the subgraph_node_index = [0,2,1,3,4]. With the change of using ORT's
-             * priority-based topo sort (node with lower node index outputs first) the sorting result is the sequence of
-             * 0, 1, ... n-1 for most of the cases, therefore subgraph_node_index as a mapping table is not needed
-             * anymore.
-             *
-             * TODO: Remove the subgraph_node_index
-             */
-            next_nodes_list[i].first[j] = group.first[sub_graph_node_index[next_nodes_list[i].first[j]]];
+            next_nodes_list[i].first[j] = group.first[next_nodes_list[i].first[j]];
           }
           nodes_list_output.push_back(next_nodes_list[i]);
         }
@@ -993,6 +942,21 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
 
   size_t num_nodes = 0;
   RETURN_IF_ERROR(ort_api.Graph_GetNumNodes(graph, &num_nodes));
+
+  /*
+  // Sort OrtGraph with a custom Kahn's topological sorting algorithm.
+  std::vector<size_t> node_index;
+  THROW_IF_ERROR(KahnsTopologicalSort(
+      *graph,
+      [&](const OrtNode* node) {
+        size_t node_id = 0;
+        Ort::Status status(Ort::GetApi().Node_GetId(node, &node_id));
+        ENFORCE(status.IsOK());
+
+        node_index.push_back(node_id);
+      },
+      PriorityNodeCompare()));
+  */
 
   // Get all the nodes from the graph
   std::vector<const OrtNode*> nodes(num_nodes);
