@@ -812,9 +812,176 @@ bool TensorrtExecutionProvider::IsSubGraphFullySupported(const OrtGraph* graph, 
 SubGraphCollection_t TensorrtExecutionProvider::GetSupportedList(SubGraphCollection_t nodes_vector_input,
                                                                  int iterations, const int max_iterations,
                                                                  const OrtGraph* graph, bool* early_termination) const {
-  // Temporarily make all nodes supported
-  SubGraphCollection_t nodes_list_output = nodes_vector_input;
+  // Return if iterations are exceeding predefined number
+  SubGraphCollection_t nodes_list_output;
+  if (iterations > max_iterations) {
+    *early_termination = true;
+    return nodes_list_output;
+  }
 
+  iterations++;
+  auto ort_graph = Ort::ConstGraph(graph);
+
+  // Sort OrtGraph with a custom Kahn's topological sorting algorithm.
+  std::vector<size_t> node_index;
+  THROW_IF_ERROR(KahnsTopologicalSort(
+      *ort_graph,
+      [&](const OrtNode* node) {
+        size_t node_id = 0;
+        Ort::Status status(Ort::GetApi().Node_GetId(node, &node_id));
+        ENFORCE(status.IsOK());
+
+        node_index.push_back(node_id);
+      },
+      PriorityNodeCompare()));
+
+  for (const auto& group : nodes_vector_input) {
+    // Construct subgraph
+    if (!group.first.empty()) {
+      if (group.second) {
+        nodes_list_output.push_back(group);
+      } else {
+
+        std::vector<Ort::ConstNode> nodes = ort_graph.GetNodes();
+        std::vector<Ort::ConstNode> selected_nodes(group.first.size());
+        size_t i = 0;
+        for (const auto& index : group.first) {
+          selected_nodes[i++] = nodes[node_index[index]];
+        }
+
+        Ort::Graph sub_graph = ort_graph.GetGraphView(selected_nodes);
+
+        // Check if input tensors have shapes
+        if (iterations > 1) {
+          auto graph_inputs = sub_graph.GetInputs();
+          for (auto& input_arg : graph_inputs) {
+            bool has_dim_value_or_param = true;
+
+            auto type_info = input_arg.TypeInfo();
+            if (type_info.GetONNXType() == ONNX_TYPE_TENSOR) {
+              auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
+
+              if (tensor_info.GetDimensionsCount() == 0) {
+                has_dim_value_or_param = false;
+              }
+            }
+
+            if (type_info.GetONNXType() != ONNX_TYPE_TENSOR || !has_dim_value_or_param) {
+              std::string message = "TensorRT input: " + input_arg.GetName() + " has no shape specified. " +
+                                    "Please run shape inference on the onnx model first. Details can be found in " +
+                                    "https://onnxruntime.ai/docs/execution-providers/" +
+                                    "TensorRT-ExecutionProvider.html#shape-inference-for-tensorrt-subgraphs";
+              THROW_IF_ERROR(ort_api.CreateStatus(ORT_EP_FAIL, message.c_str()));
+            }
+          }
+        }
+
+        // Construct ModelProto from OrtGraph
+        ONNX_NAMESPACE::ModelProto model_proto;
+
+        // add back handle_initializer_data to save initializer to external file
+        OrtEpUtils::OrtGraphToProto(*graph, model_proto /*, handle_initializer_data */);
+
+        std::string string_buf;
+        model_proto.SerializeToString(&string_buf);
+
+        if (dump_subgraphs_) {
+          // Dump TensorRT subgraph for debugging
+          std::fstream dump("TensorrtExecutionProvider_TRT_Subgraph.onnx",
+                            std::ios::out | std::ios::trunc | std::ios::binary);
+          model_proto.SerializeToOstream(&dump);
+        }
+
+        // Get supported node list recursively
+        SubGraphCollection_t parser_nodes_list;
+        TensorrtLogger& trt_logger = GetTensorrtLogger(detailed_build_log_, logger_, &ort_api);
+        auto trt_builder = GetBuilder(trt_logger);
+        auto network_flags = 0;
+#if NV_TENSORRT_MAJOR > 8
+        network_flags |= (fp16_enable_ || int8_enable_ || bf16_enable_)
+                             ? 0
+                             : 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kSTRONGLY_TYPED);
+#else
+        network_flags |= 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+#endif
+
+        auto trt_network = std::unique_ptr<nvinfer1::INetworkDefinition>(trt_builder->createNetworkV2(network_flags));
+        auto trt_parser =
+            tensorrt_ptr::unique_pointer<nvonnxparser::IParser>(nvonnxparser::createParser(*trt_network, trt_logger));
+        bool is_model_supported = false;
+
+#if (NV_TENSORRT_MAJOR == 10 && NV_TENSORRT_MINOR > 1) || NV_TENSORRT_MAJOR > 10
+        is_model_supported = trt_parser->supportsModelV2(string_buf.data(), string_buf.size(), model_path_);
+
+        // Note: Calling getNbSubgraphs or getSubgraphNodes before calling supportsModelV2 results in undefined
+        // behavior.
+        auto num_subgraphs = trt_parser->getNbSubgraphs();
+        parser_nodes_list.reserve(num_subgraphs);
+
+        for (int64_t i = 0; i < num_subgraphs; ++i) {
+          int64_t subgraph_len = 0;
+          int64_t* nodes = trt_parser->getSubgraphNodes(i, subgraph_len);
+          parser_nodes_list.emplace_back();
+          parser_nodes_list.back().first.reserve(subgraph_len);
+          for (int64_t j = 0; j < subgraph_len; ++j) {
+            parser_nodes_list.back().first.push_back(nodes[j]);
+          }
+          parser_nodes_list.back().second = is_model_supported ? true : false;
+        }
+#else
+        trt_parser->supportsModel(string_buf.data(), string_buf.size(), parser_nodes_list, model_path_);
+#endif  // (NV_TENSORRT_MAJOR == 10 && NV_TENSORRT_MINOR > 1) || NV_TENSORRT_MAJOR > 10
+
+
+        std::vector<size_t> sub_graph_node_index;
+        THROW_IF_ERROR(KahnsTopologicalSort(
+            *sub_graph,
+            [&](const OrtNode* node) {
+              size_t node_id = 0;
+              Ort::Status status(Ort::GetApi().Node_GetId(node, &node_id));
+              ENFORCE(status.IsOK());
+
+              sub_graph_node_index.push_back(node_id);
+            },
+            PriorityNodeCompare()));
+
+        SubGraphCollection_t next_nodes_list =
+            GetSupportedList(parser_nodes_list, iterations, max_iterations, sub_graph, early_termination);
+
+        for (size_t i = 0, end = next_nodes_list.size(); i < end; ++i) {
+          for (size_t j = 0, end = next_nodes_list[i].first.size(); j < end; ++j) {
+            /*
+             * Convert the supported node list returning from onnx-tensorrt parser to the node list recognized by ORT
+             * TRT.
+             *
+             * TRT EP reconstructs the graph based on the nodes in group.first and feeds this graph (converts to model
+             * proto and to string buffer) to onnx-tensorrt parser. The node index in the list returning from
+             * onnx-tensorrt parser might not be the same as the node index in group.first. Therefore, TRT EP needs a
+             * node index mapping table here.
+             *
+             * The order of iterating the nodes in group.first and calling graph_build.AddNode() determines the node
+             * order in the newly constructed graph (see Graph::AllocateNode() in graph.cc), however, once the graph is
+             * converted to model proto, the node proto order in model proto (ex: onnx-tensorrt calls
+             * model.graph().node() to iterate NodeProto in ModelProto) is decided by topo sort.
+             *
+             * The topo sort list (i.e. subgraph_node_index) acts as the node index mapping table:
+             * sub_graph_node_index[node index from onnx-tensorrt parser] = index in group.first
+             *
+             * In the past, TRT EP uses ORT's default reversed DFS topo sort which might end up with the sorting result
+             * not sequence of 0, 1, ... n-1, ex: the subgraph_node_index = [0,2,1,3,4]. With the change of using ORT's
+             * priority-based topo sort (node with lower node index outputs first) the sorting result is the sequence of
+             * 0, 1, ... n-1 for most of the cases, therefore subgraph_node_index as a mapping table is not needed
+             * anymore.
+             *
+             * TODO: Remove the subgraph_node_index
+             */
+            next_nodes_list[i].first[j] = group.first[sub_graph_node_index[next_nodes_list[i].first[j]]];
+          }
+          nodes_list_output.push_back(next_nodes_list[i]);
+        }
+      }
+    }
+  }
   return nodes_list_output;
 }
 

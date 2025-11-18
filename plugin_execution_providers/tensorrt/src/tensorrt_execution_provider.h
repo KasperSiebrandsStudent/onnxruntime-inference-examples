@@ -276,6 +276,7 @@ struct TensorrtExecutionProvider : public OrtEp, public ApiPtrs {
   size_t max_workspace_size_ = 1 << 30;  // 1GB
   bool fp16_enable_ = false;
   bool int8_enable_ = false;
+  bool bf16_enable_ = false;
   bool dla_enable_ = false;
   int dla_core_ = 0;
   bool force_sequential_engine_build_ = false;
