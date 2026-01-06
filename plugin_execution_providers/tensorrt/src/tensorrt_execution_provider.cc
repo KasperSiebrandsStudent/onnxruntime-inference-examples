@@ -821,19 +821,29 @@ SubGraphCollection_t TensorrtExecutionProvider::GetSupportedList(SubGraphCollect
 
   iterations++;
   auto ort_graph = Ort::ConstGraph(graph);
+  std::vector<Ort::ConstNode> topo_sorted_nodes;
+  Ort::Status status(KahnsTopologicalSort(
+      *graph,
+      [&](const OrtNode* node) {
+        size_t node_id = 0;
+        Ort::Status status(Ort::GetApi().Node_GetId(node, &node_id));
+        ENFORCE(status.IsOK());
+
+        topo_sorted_nodes.push_back(Ort::ConstNode(node));
+      },
+      PriorityNodeCompare()));
+  ENFORCE(status.IsOK());
 
   for (const auto& group : nodes_vector_input) {
     // Construct subgraph
     if (!group.first.empty()) {
       if (group.second) {
         nodes_list_output.push_back(group);
-      } else {
-
-        std::vector<Ort::ConstNode> nodes = ort_graph.GetNodes();
+      } else { 
         std::vector<Ort::ConstNode> selected_nodes(group.first.size());
         size_t i = 0;
         for (const auto& index : group.first) {
-          selected_nodes[i++] = nodes[index];
+          selected_nodes[i++] = topo_sorted_nodes[index];
         }
 
         Ort::Graph sub_graph = ort_graph.GetGraphView(selected_nodes);
@@ -867,7 +877,7 @@ SubGraphCollection_t TensorrtExecutionProvider::GetSupportedList(SubGraphCollect
         ONNX_NAMESPACE::ModelProto model_proto;
 
         // add back handle_initializer_data to save initializer to external file
-        OrtEpUtils::OrtGraphToProto(*graph, model_proto /*, handle_initializer_data */);
+        OrtEpUtils::OrtGraphToProto(*sub_graph, model_proto /*, handle_initializer_data */);
 
         std::string string_buf;
         model_proto.SerializeToString(&string_buf);
@@ -919,12 +929,34 @@ SubGraphCollection_t TensorrtExecutionProvider::GetSupportedList(SubGraphCollect
         trt_parser->supportsModel(string_buf.data(), string_buf.size(), parser_nodes_list, model_path_);
 #endif  // (NV_TENSORRT_MAJOR == 10 && NV_TENSORRT_MINOR > 1) || NV_TENSORRT_MAJOR > 10
 
+        std::vector<Ort::ConstNode> sub_graph_topo_sorted_nodes;
+        Ort::Status status(KahnsTopologicalSort(
+            *sub_graph,
+            [&](const OrtNode* node) {
+              size_t node_id = 0;
+              Ort::Status status(Ort::GetApi().Node_GetId(node, &node_id));
+              ENFORCE(status.IsOK());
+
+              sub_graph_topo_sorted_nodes.push_back(Ort::ConstNode(node));
+            },
+            PriorityNodeCompare()));
+        ENFORCE(status.IsOK());
+
+        // This is the mapping table that stores the "node id to sub_graph's index" pair.
+        // It's used for locating the node index in original `group.first` given a node id.
+        std::unordered_map<size_t, size_t> node_id_to_sub_graph_id;
+        size_t sub_graph_id = 0;
+        for (const auto& node : sub_graph_topo_sorted_nodes) {
+          node_id_to_sub_graph_id.emplace(node.GetId(), sub_graph_id++);
+        }
+
         SubGraphCollection_t next_nodes_list =
             GetSupportedList(parser_nodes_list, iterations, max_iterations, sub_graph, early_termination);
 
         for (size_t i = 0, end = next_nodes_list.size(); i < end; ++i) {
           for (size_t j = 0, end = next_nodes_list[i].first.size(); j < end; ++j) {
-            next_nodes_list[i].first[j] = group.first[next_nodes_list[i].first[j]];
+            Ort::ConstNode sub_graph_node = sub_graph_topo_sorted_nodes[next_nodes_list[i].first[j]];
+            next_nodes_list[i].first[j] = group.first[node_id_to_sub_graph_id[sub_graph_node.GetId()]];
           }
           nodes_list_output.push_back(next_nodes_list[i]);
         }
@@ -938,29 +970,19 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
                                                                      OrtEpGraphSupportInfo* graph_support_info) noexcept {
   TensorrtExecutionProvider* ep = static_cast<TensorrtExecutionProvider*>(this_ptr);
   const OrtApi& ort_api = ep->ort_api;
+
   auto ort_graph = Ort::ConstGraph(graph);
-
-  size_t num_nodes = 0;
-  RETURN_IF_ERROR(ort_api.Graph_GetNumNodes(graph, &num_nodes));
-
-  /*
-  // Sort OrtGraph with a custom Kahn's topological sorting algorithm.
-  std::vector<size_t> node_index;
-  THROW_IF_ERROR(KahnsTopologicalSort(
+  std::vector<Ort::ConstNode> topo_sorted_nodes;
+  RETURN_IF_ERROR(KahnsTopologicalSort(
       *graph,
       [&](const OrtNode* node) {
         size_t node_id = 0;
         Ort::Status status(Ort::GetApi().Node_GetId(node, &node_id));
         ENFORCE(status.IsOK());
 
-        node_index.push_back(node_id);
+        topo_sorted_nodes.push_back(Ort::ConstNode(node));
       },
       PriorityNodeCompare()));
-  */
-
-  // Get all the nodes from the graph
-  std::vector<const OrtNode*> nodes(num_nodes);
-  RETURN_IF_ERROR(ort_api.Graph_GetNodes(graph, nodes.data(), nodes.size()));
 
   SubGraphCollection_t parser_nodes_vector, supported_nodes_vector;
   bool new_subgraph = true;
@@ -986,8 +1008,8 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
    *   1. It's a control flow op and its subgraph(s) is not fully TRT eligible.
    *   2. Its op type is in the exclusion list.
    */
-  for (size_t index = 0; index < nodes.size(); index++) {
-    const OrtNode* node = nodes[index];
+  for (size_t index = 0; index < topo_sorted_nodes.size(); index++) {
+    const OrtNode* node = topo_sorted_nodes[index];
     bool supported_node = true;
 
     /* If current node is control flow op, we take different approach based on following four cases:
@@ -1134,7 +1156,7 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
       for (const auto& group : supported_nodes_vector) {
         if (!group.first.empty()) {
           for (const auto& index : group.first) {
-            const OrtNode* supported_node = nodes[index];
+            const OrtNode* supported_node = topo_sorted_nodes[index];
             RETURN_IF_ERROR(ep->ep_api.EpGraphSupportInfo_AddSingleNode(graph_support_info, supported_node));
           }
         }
@@ -1155,7 +1177,7 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
       supported_nodes.reserve(group.first.size());
 
       for (const auto& index : group.first) {
-        const OrtNode* supported_node = nodes[index];
+        const OrtNode* supported_node = topo_sorted_nodes[index];
 
         supported_nodes.push_back(supported_node);
       }
@@ -1179,7 +1201,7 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
     Ort::ThrowOnError(ep->ort_api.Logger_LogMessage(&ep->logger_,
                                                     OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING,
                                                     message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
-  } else if (number_of_trt_nodes == nodes.size()) {
+  } else if (number_of_trt_nodes == topo_sorted_nodes.size()) {
     std::string message = "[TensorRT EP] Whole graph will run on TensorRT execution provider";
     Ort::ThrowOnError(ep->ort_api.Logger_LogMessage(&ep->logger_,
                                                     OrtLoggingLevel::ORT_LOGGING_LEVEL_INFO,
