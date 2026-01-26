@@ -820,10 +820,13 @@ SubGraphCollection_t TensorrtExecutionProvider::GetSupportedList(SubGraphCollect
   }
 
   iterations++;
+
   auto ort_graph = Ort::ConstGraph(graph);
+
+  // Sort the nodes in priority-based topological order
   std::vector<Ort::ConstNode> topo_sorted_nodes;
   Ort::Status status(KahnsTopologicalSort(
-      *graph,
+      *ort_graph,
       [&](const OrtNode* node) {
         size_t node_id = 0;
         Ort::Status status(Ort::GetApi().Node_GetId(node, &node_id));
@@ -929,6 +932,7 @@ SubGraphCollection_t TensorrtExecutionProvider::GetSupportedList(SubGraphCollect
         trt_parser->supportsModel(string_buf.data(), string_buf.size(), parser_nodes_list, model_path_);
 #endif  // (NV_TENSORRT_MAJOR == 10 && NV_TENSORRT_MINOR > 1) || NV_TENSORRT_MAJOR > 10
 
+        // Sort the nodes in priority-based topological order
         std::vector<Ort::ConstNode> sub_graph_topo_sorted_nodes;
         Ort::Status status(KahnsTopologicalSort(
             *sub_graph,
@@ -972,9 +976,11 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
   const OrtApi& ort_api = ep->ort_api;
 
   auto ort_graph = Ort::ConstGraph(graph);
+
+  // Sort the nodes in priority-based topological order
   std::vector<Ort::ConstNode> topo_sorted_nodes;
   RETURN_IF_ERROR(KahnsTopologicalSort(
-      *graph,
+      *ort_graph,
       [&](const OrtNode* node) {
         size_t node_id = 0;
         Ort::Status status(Ort::GetApi().Node_GetId(node, &node_id));
@@ -1224,6 +1230,23 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
                                                                      /* out */ OrtNodeComputeInfo** node_compute_info,
                                                                      /* out */ OrtNode** ep_context_node) {
   TensorrtExecutionProvider* ep = static_cast<TensorrtExecutionProvider*>(this_ptr);
+  auto ort_graph = Ort::ConstGraph(graph);
+
+  // Sort the nodes in priority-based topological order
+  std::vector<Ort::ConstNode> topo_sorted_nodes;
+  Ort::Status status(KahnsTopologicalSort(
+      *ort_graph,
+      [&](const OrtNode* node) {
+        size_t node_id = 0;
+        Ort::Status status(Ort::GetApi().Node_GetId(node, &node_id));
+        ENFORCE(status.IsOK());
+
+        topo_sorted_nodes.push_back(Ort::ConstNode(node));
+      },
+      PriorityNodeCompare()));
+  ENFORCE(status.IsOK());
+
+  Ort::Graph topo_sorted_graph = ort_graph.GetGraphView(topo_sorted_nodes);
 
   // Comment out following code if you want the "large" initializers to be saved to a external file.
   /*
@@ -1987,7 +2010,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
   profiles_.emplace(fused_node_name, std::move(trt_profiles));
 
   // Create EP Context nodes
-  std::unique_ptr<EPContextNodeHelper> ep_ctx_node_helper = std::make_unique<EPContextNodeHelper>(*ep, graph, fused_node);
+  std::unique_ptr<EPContextNodeHelper> ep_ctx_node_helper = std::make_unique<EPContextNodeHelper>(*ep, topo_sorted_graph, fused_node);
   if (dump_ep_context_model_) {
     std::string compute_capability_hw_compat = compute_capability_;
     if (engine_cache_enable_ && engine_hw_compatible_) {
