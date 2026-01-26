@@ -1280,7 +1280,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
   ONNX_NAMESPACE::ModelProto model_proto;
 
   // add back handle_initializer_data to save initializer to external file
-  OrtEpUtils::OrtGraphToProto(*graph, model_proto /*, handle_initializer_data */);
+  OrtEpUtils::OrtGraphToProto(*topo_sorted_graph, model_proto /*, handle_initializer_data */);
 
   std::string string_buf;
   model_proto.SerializeToString(&string_buf);
