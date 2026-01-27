@@ -124,6 +124,7 @@ struct TensorrtComputeState {
   std::string compute_capability;
   size_t max_workspace_size = 1 << 30;  // 1GB;
   bool fp16_enable = false;
+  bool bf16_enable = false;
   bool int8_enable = false;
   bool int8_calibration_cache_available = false;
   bool dla_enable = false;

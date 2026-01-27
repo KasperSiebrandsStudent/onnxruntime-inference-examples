@@ -1283,7 +1283,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
   auto trt_builder = GetBuilder(trt_logger);
   auto network_flags = 0;
 #if NV_TENSORRT_MAJOR > 8
-  network_flags |= (fp16_enable_ || int8_enable_)
+  network_flags |= (fp16_enable_ || int8_enable_ || bf16_enable_)
                        ? 0
                        : 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kSTRONGLY_TYPED);
 #else
@@ -1303,7 +1303,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
 #pragma warning(push)
 #pragma warning(disable : 4996)
 #endif
-  if (fp16_enable_ && layer_norm_fp32_fallback_) {
+  if ((fp16_enable_ || bf16_enable_) && layer_norm_fp32_fallback_) {
     for (auto idx = 1; idx < trt_network->getNbLayers() - 1; ++idx) {
       auto layer = trt_network->getLayer(idx);
       auto next_layer = trt_network->getLayer(idx + 1);
@@ -1470,7 +1470,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
   }
 
   // Check platform availability for low precision
-  if (fp16_enable_) {
+  if (fp16_enable_ || bf16_enable_) {
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4996)
@@ -1480,6 +1480,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
 #pragma warning(pop)
 #endif
       fp16_enable_ = false;
+      bf16_enable_ = false;
       std::string message = "[TensorRT EP] ORT_TENSORRT_FP16_ENABLE or ORT_TENSORRT_BF16_ENABLE is set, but platform doesn't support fast native fp16/bf16";
       Ort::ThrowOnError(ep->ort_api.Logger_LogMessage(&ep->logger_,
                                                       OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING,
@@ -1531,6 +1532,16 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
                                                     OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE,
                                                     message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
   }
+
+  if (bf16_enable_) {
+    trt_config->setFlag(nvinfer1::BuilderFlag::kBF16);
+    trt_node_name_with_precision += "_bf16";
+    std::string message = "[TensorRT EP] BF16 mode is enabled";
+    Ort::ThrowOnError(ep->ort_api.Logger_LogMessage(&ep->logger_,
+                                                    OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE,
+                                                    message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
+  }
+
   if (int8_enable_) {
     trt_config->setFlag(nvinfer1::BuilderFlag::kINT8);
     trt_node_name_with_precision += "_int8";
@@ -2043,6 +2054,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
       &tensorrt_mu_,
       compute_capability_,
       max_workspace_size_,
+      bf16_enable_,
       fp16_enable_,
       int8_enable_,
       int8_calibration_cache_available_,
@@ -2656,6 +2668,7 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
     max_workspace_size_ = info_.max_workspace_size;
     fp16_enable_ = info_.fp16_enable;
     int8_enable_ = info_.int8_enable;
+    bf16_enable_ = info_.bf16_enable;
     if (int8_enable_) {
       int8_calibration_cache_name_ = info_.int8_calibration_table_name;
       int8_use_native_tensorrt_calibration_table_ = info_.int8_use_native_calibration_table;
@@ -2697,7 +2710,7 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
     }
     force_sequential_engine_build_ = info_.force_sequential_engine_build;
     context_memory_sharing_enable_ = info_.context_memory_sharing_enable;
-    if (fp16_enable_) {
+    if (fp16_enable_ || bf16_enable_) {
       layer_norm_fp32_fallback_ = info_.layer_norm_fp32_fallback;
     }
     build_heuristics_enable_ = info_.build_heuristics_enable;
@@ -3221,6 +3234,13 @@ OrtStatus* TRTEpNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_ptr, void*
     if (trt_state->fp16_enable) {
       trt_config->setFlag(nvinfer1::BuilderFlag::kFP16);
       std::string message = "[TensorRT EP] FP16 mode is enabled";
+      Ort::ThrowOnError(ep.ort_api.Logger_LogMessage(&ep.logger_,
+                                                     OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE,
+                                                     message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
+    }
+    if (trt_state->bf16_enable) {
+      trt_config->setFlag(nvinfer1::BuilderFlag::kBF16);
+      std::string message = "[TensorRT EP] BF16 mode is enabled";
       Ort::ThrowOnError(ep.ort_api.Logger_LogMessage(&ep.logger_,
                                                      OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE,
                                                      message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
