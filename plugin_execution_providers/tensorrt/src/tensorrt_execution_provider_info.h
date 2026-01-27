@@ -18,6 +18,7 @@ struct TensorrtExecutionProviderInfo {
   size_t max_workspace_size{1 << 30};
   bool fp16_enable{false};
   bool int8_enable{false};
+  bool bf16_enable{false};
   std::string int8_calibration_table_name{""};
   bool int8_use_native_calibration_table{false};
   bool dla_enable{false};

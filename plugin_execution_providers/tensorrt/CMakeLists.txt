@@ -5,6 +5,8 @@
 cmake_minimum_required(VERSION 3.26)
 project(TensorRTEp VERSION 1.0)
 set(CMAKE_CXX_STANDARD 17)
+set(plugin_ep_common_dir ${CMAKE_SOURCE_DIR}/../common)
+include(${plugin_ep_common_dir}/cmake/onnxruntime_library_utils.cmake)
 
 enable_language(CUDA) # via nvcc to get the CUDA tool kit
 file(TO_CMAKE_PATH "/usr/local/cuda" CUDAToolkit_ROOT)
@@ -28,12 +30,17 @@ endif()
 add_definitions(-DONNX_NAMESPACE=onnx)
 add_definitions(-DONNX_ML)
 add_definitions(-DNOMINMAX)
-file(GLOB tensorrt_src "./*.cc" "./utils/*.cc" "./cuda/unary_elementwise_ops_impl.cu" "./*.h")
+file(GLOB tensorrt_src "./src/*.cc" "./src/utils/*.cc" "./src/cuda/unary_elementwise_ops_impl.cu" "./src/*.h")
 add_library(TensorRTEp SHARED ${tensorrt_src})
 
-if (NOT ORT_HOME)
-  message(FATAL_ERROR "Please specify ORT_HOME, e.g. -DORT_HOME=/path/to/ort/")
-endif()
+set_onnxruntime_paths(
+  ORT_HOME ${ORT_HOME}
+  DEFAULT_ORT_VERSION "1.23.2"
+  ORT_INCLUDE_DIR_VAR ORT_INCLUDE_DIR
+  ORT_LIBRARY_DIR_VAR ORT_LIBRARY_DIR)
+
+message(STATUS "ORT_LIBRARY_DIR: ${ORT_LIBRARY_DIR}")
+message(STATUS "ORT_INCLUDE_DIR: ${ORT_INCLUDE_DIR}")
 
 if (NOT TENSORRT_HOME)
   message(FATAL_ERROR "Please specify TENSORRT_HOME, e.g. -DTENSORRT_HOME=/path/to/trt/")
@@ -111,7 +118,7 @@ if (WIN32) # Windows
                 "${DEPS_PATH}/onnx-build/${CMAKE_BUILD_TYPE}/onnx_proto.lib")
 
   set(TRT_EP_LIB_LINK_FLAG
-        "-DEF:${CMAKE_SOURCE_DIR}/tensorrt_execution_provider.def")
+        "-DEF:${CMAKE_SOURCE_DIR}/src/tensorrt_execution_provider.def")
 
 else() # Linux
   set(ORT_LIB "${ORT_HOME}/lib/libonnxruntime.so")
@@ -142,7 +149,7 @@ set_property(TARGET TensorRTEp APPEND_STRING PROPERTY LINK_FLAGS
                ${TRT_EP_LIB_LINK_FLAG})
 
 target_include_directories(TensorRTEp PUBLIC "${ORT_HOME}/include"
-                                             "./utils"
+                                             "./src/utils"
                                              "/usr/local/cuda/include"
                                              "${TENSORRT_HOME}/include"
                                              "${DEPS_PATH}/flatbuffers-src/include"

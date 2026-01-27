@@ -14,7 +14,7 @@
 namespace trt_ep {
 
 TensorrtExecutionProviderFactory::TensorrtExecutionProviderFactory(const char* ep_name, const OrtLogger& default_logger, ApiPtrs apis)
-    : ApiPtrs(apis), default_logger_{default_logger}, ep_name_{ep_name} {
+    : OrtEpFactory {}, ApiPtrs(apis), default_logger_{default_logger}, ep_name_{ep_name} {
   ort_version_supported = ORT_API_VERSION;  // set to the ORT version we were compiled with.
   GetName = GetNameImpl;
   GetVendor = GetVendorImpl;

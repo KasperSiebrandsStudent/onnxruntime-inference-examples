@@ -812,9 +812,153 @@ bool TensorrtExecutionProvider::IsSubGraphFullySupported(const OrtGraph* graph, 
 SubGraphCollection_t TensorrtExecutionProvider::GetSupportedList(SubGraphCollection_t nodes_vector_input,
                                                                  int iterations, const int max_iterations,
                                                                  const OrtGraph* graph, bool* early_termination) const {
-  // Temporarily make all nodes supported
-  SubGraphCollection_t nodes_list_output = nodes_vector_input;
+  // Return if iterations are exceeding predefined number
+  SubGraphCollection_t nodes_list_output;
+  if (iterations > max_iterations) {
+    *early_termination = true;
+    return nodes_list_output;
+  }
 
+  iterations++;
+
+  auto ort_graph = Ort::ConstGraph(graph);
+
+  // Sort the nodes in priority-based topological order
+  std::vector<Ort::ConstNode> topo_sorted_nodes;
+  Ort::Status status(KahnsTopologicalSort(
+      *ort_graph,
+      [&](const OrtNode* node) {
+        topo_sorted_nodes.push_back(Ort::ConstNode(node));
+      },
+      PriorityNodeCompare()));
+  ENFORCE(status.IsOK());
+
+  for (const auto& group : nodes_vector_input) {
+    // Construct subgraph
+    if (!group.first.empty()) {
+      if (group.second) {
+        nodes_list_output.push_back(group);
+      } else { 
+        std::vector<Ort::ConstNode> selected_nodes(group.first.size());
+        size_t i = 0;
+        for (const auto& index : group.first) {
+          selected_nodes[i++] = topo_sorted_nodes[index];
+        }
+
+        Ort::Graph sub_graph = ort_graph.GetGraphView(selected_nodes);
+
+        // Check if input tensors have shapes
+        if (iterations > 1) {
+          auto graph_inputs = sub_graph.GetInputs();
+          for (auto& input_arg : graph_inputs) {
+            bool has_dim_value_or_param = true;
+
+            auto type_info = input_arg.TypeInfo();
+            if (type_info.GetONNXType() == ONNX_TYPE_TENSOR) {
+              auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
+
+              if (tensor_info.GetDimensionsCount() == 0) {
+                has_dim_value_or_param = false;
+              }
+            }
+
+            if (type_info.GetONNXType() != ONNX_TYPE_TENSOR || !has_dim_value_or_param) {
+              std::string message = "TensorRT input: " + input_arg.GetName() + " has no shape specified. " +
+                                    "Please run shape inference on the onnx model first. Details can be found in " +
+                                    "https://onnxruntime.ai/docs/execution-providers/" +
+                                    "TensorRT-ExecutionProvider.html#shape-inference-for-tensorrt-subgraphs";
+              THROW_IF_ERROR(ort_api.CreateStatus(ORT_EP_FAIL, message.c_str()));
+            }
+          }
+        }
+
+        // Construct ModelProto from OrtGraph
+        ONNX_NAMESPACE::ModelProto model_proto;
+
+        // add back handle_initializer_data to save initializer to external file
+        OrtEpUtils::OrtGraphToProto(*sub_graph, model_proto /*, handle_initializer_data */);
+
+        std::string string_buf;
+        model_proto.SerializeToString(&string_buf);
+
+        if (dump_subgraphs_) {
+          // Dump TensorRT subgraph for debugging
+          std::fstream dump("TensorrtExecutionProvider_TRT_Subgraph.onnx",
+                            std::ios::out | std::ios::trunc | std::ios::binary);
+          model_proto.SerializeToOstream(&dump);
+        }
+
+        // Get supported node list recursively
+        SubGraphCollection_t parser_nodes_list;
+        TensorrtLogger& trt_logger = GetTensorrtLogger(detailed_build_log_, logger_, &ort_api);
+        auto trt_builder = GetBuilder(trt_logger);
+        auto network_flags = 0;
+#if NV_TENSORRT_MAJOR > 8
+        network_flags |= (fp16_enable_ || int8_enable_ || bf16_enable_)
+                             ? 0
+                             : 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kSTRONGLY_TYPED);
+#else
+        network_flags |= 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+#endif
+
+        auto trt_network = std::unique_ptr<nvinfer1::INetworkDefinition>(trt_builder->createNetworkV2(network_flags));
+        auto trt_parser =
+            tensorrt_ptr::unique_pointer<nvonnxparser::IParser>(nvonnxparser::createParser(*trt_network, trt_logger));
+        bool is_model_supported = false;
+
+#if (NV_TENSORRT_MAJOR == 10 && NV_TENSORRT_MINOR > 1) || NV_TENSORRT_MAJOR > 10
+        is_model_supported = trt_parser->supportsModelV2(string_buf.data(), string_buf.size(), model_path_);
+
+        // Note: Calling getNbSubgraphs or getSubgraphNodes before calling supportsModelV2 results in undefined
+        // behavior.
+        auto num_subgraphs = trt_parser->getNbSubgraphs();
+        parser_nodes_list.reserve(num_subgraphs);
+
+        for (int64_t i = 0; i < num_subgraphs; ++i) {
+          int64_t subgraph_len = 0;
+          int64_t* nodes = trt_parser->getSubgraphNodes(i, subgraph_len);
+          parser_nodes_list.emplace_back();
+          parser_nodes_list.back().first.reserve(subgraph_len);
+          for (int64_t j = 0; j < subgraph_len; ++j) {
+            parser_nodes_list.back().first.push_back(nodes[j]);
+          }
+          parser_nodes_list.back().second = is_model_supported ? true : false;
+        }
+#else
+        trt_parser->supportsModel(string_buf.data(), string_buf.size(), parser_nodes_list, model_path_);
+#endif  // (NV_TENSORRT_MAJOR == 10 && NV_TENSORRT_MINOR > 1) || NV_TENSORRT_MAJOR > 10
+
+        // Sort the nodes in priority-based topological order
+        std::vector<Ort::ConstNode> sub_graph_topo_sorted_nodes;
+        Ort::Status status(KahnsTopologicalSort(
+            *sub_graph,
+            [&](const OrtNode* node) {
+              sub_graph_topo_sorted_nodes.push_back(Ort::ConstNode(node));
+            },
+            PriorityNodeCompare()));
+        ENFORCE(status.IsOK());
+
+        // This is the mapping table that stores the "node id to sub_graph's index" pair.
+        // It's used for locating the node index in original `group.first` given a node id.
+        std::unordered_map<size_t, size_t> node_id_to_sub_graph_id;
+        size_t sub_graph_id = 0;
+        for (const auto& node : sub_graph_topo_sorted_nodes) {
+          node_id_to_sub_graph_id.emplace(node.GetId(), sub_graph_id++);
+        }
+
+        SubGraphCollection_t next_nodes_list =
+            GetSupportedList(parser_nodes_list, iterations, max_iterations, sub_graph, early_termination);
+
+        for (size_t i = 0, end = next_nodes_list.size(); i < end; ++i) {
+          for (size_t j = 0, end = next_nodes_list[i].first.size(); j < end; ++j) {
+            Ort::ConstNode sub_graph_node = sub_graph_topo_sorted_nodes[next_nodes_list[i].first[j]];
+            next_nodes_list[i].first[j] = group.first[node_id_to_sub_graph_id[sub_graph_node.GetId()]];
+          }
+          nodes_list_output.push_back(next_nodes_list[i]);
+        }
+      }
+    }
+  }
   return nodes_list_output;
 }
 
@@ -822,14 +966,17 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
                                                                      OrtEpGraphSupportInfo* graph_support_info) noexcept {
   TensorrtExecutionProvider* ep = static_cast<TensorrtExecutionProvider*>(this_ptr);
   const OrtApi& ort_api = ep->ort_api;
+
   auto ort_graph = Ort::ConstGraph(graph);
 
-  size_t num_nodes = 0;
-  RETURN_IF_ERROR(ort_api.Graph_GetNumNodes(graph, &num_nodes));
-
-  // Get all the nodes from the graph
-  std::vector<const OrtNode*> nodes(num_nodes);
-  RETURN_IF_ERROR(ort_api.Graph_GetNodes(graph, nodes.data(), nodes.size()));
+  // Sort the nodes in priority-based topological order
+  std::vector<Ort::ConstNode> topo_sorted_nodes;
+  RETURN_IF_ERROR(KahnsTopologicalSort(
+      *ort_graph,
+      [&](const OrtNode* node) {
+        topo_sorted_nodes.push_back(Ort::ConstNode(node));
+      },
+      PriorityNodeCompare()));
 
   SubGraphCollection_t parser_nodes_vector, supported_nodes_vector;
   bool new_subgraph = true;
@@ -855,8 +1002,8 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
    *   1. It's a control flow op and its subgraph(s) is not fully TRT eligible.
    *   2. Its op type is in the exclusion list.
    */
-  for (size_t index = 0; index < nodes.size(); index++) {
-    const OrtNode* node = nodes[index];
+  for (size_t index = 0; index < topo_sorted_nodes.size(); index++) {
+    const OrtNode* node = topo_sorted_nodes[index];
     bool supported_node = true;
 
     /* If current node is control flow op, we take different approach based on following four cases:
@@ -1003,7 +1150,7 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
       for (const auto& group : supported_nodes_vector) {
         if (!group.first.empty()) {
           for (const auto& index : group.first) {
-            const OrtNode* supported_node = nodes[index];
+            const OrtNode* supported_node = topo_sorted_nodes[index];
             RETURN_IF_ERROR(ep->ep_api.EpGraphSupportInfo_AddSingleNode(graph_support_info, supported_node));
           }
         }
@@ -1024,7 +1171,7 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
       supported_nodes.reserve(group.first.size());
 
       for (const auto& index : group.first) {
-        const OrtNode* supported_node = nodes[index];
+        const OrtNode* supported_node = topo_sorted_nodes[index];
 
         supported_nodes.push_back(supported_node);
       }
@@ -1048,7 +1195,7 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
     Ort::ThrowOnError(ep->ort_api.Logger_LogMessage(&ep->logger_,
                                                     OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING,
                                                     message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
-  } else if (number_of_trt_nodes == nodes.size()) {
+  } else if (number_of_trt_nodes == topo_sorted_nodes.size()) {
     std::string message = "[TensorRT EP] Whole graph will run on TensorRT execution provider";
     Ort::ThrowOnError(ep->ort_api.Logger_LogMessage(&ep->logger_,
                                                     OrtLoggingLevel::ORT_LOGGING_LEVEL_INFO,
@@ -1071,6 +1218,19 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
                                                                      /* out */ OrtNodeComputeInfo** node_compute_info,
                                                                      /* out */ OrtNode** ep_context_node) {
   TensorrtExecutionProvider* ep = static_cast<TensorrtExecutionProvider*>(this_ptr);
+  auto ort_graph = Ort::ConstGraph(graph);
+
+  // Sort the nodes in priority-based topological order
+  std::vector<Ort::ConstNode> topo_sorted_nodes;
+  Ort::Status status(KahnsTopologicalSort(
+      *ort_graph,
+      [&](const OrtNode* node) {
+        topo_sorted_nodes.push_back(Ort::ConstNode(node));
+      },
+      PriorityNodeCompare()));
+  ENFORCE(status.IsOK());
+
+  Ort::Graph topo_sorted_graph = ort_graph.GetGraphView(topo_sorted_nodes);
 
   // Comment out following code if you want the "large" initializers to be saved to a external file.
   /*
@@ -1104,7 +1264,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
   ONNX_NAMESPACE::ModelProto model_proto;
 
   // add back handle_initializer_data to save initializer to external file
-  OrtEpUtils::OrtGraphToProto(*graph, model_proto /*, handle_initializer_data */);
+  OrtEpUtils::OrtGraphToProto(*topo_sorted_graph, model_proto /*, handle_initializer_data */);
 
   std::string string_buf;
   model_proto.SerializeToString(&string_buf);
@@ -1123,7 +1283,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
   auto trt_builder = GetBuilder(trt_logger);
   auto network_flags = 0;
 #if NV_TENSORRT_MAJOR > 8
-  network_flags |= (fp16_enable_ || int8_enable_)
+  network_flags |= (fp16_enable_ || int8_enable_ || bf16_enable_)
                        ? 0
                        : 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kSTRONGLY_TYPED);
 #else
@@ -1143,7 +1303,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
 #pragma warning(push)
 #pragma warning(disable : 4996)
 #endif
-  if (fp16_enable_ && layer_norm_fp32_fallback_) {
+  if ((fp16_enable_ || bf16_enable_) && layer_norm_fp32_fallback_) {
     for (auto idx = 1; idx < trt_network->getNbLayers() - 1; ++idx) {
       auto layer = trt_network->getLayer(idx);
       auto next_layer = trt_network->getLayer(idx + 1);
@@ -1310,7 +1470,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
   }
 
   // Check platform availability for low precision
-  if (fp16_enable_) {
+  if (fp16_enable_ || bf16_enable_) {
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4996)
@@ -1320,6 +1480,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
 #pragma warning(pop)
 #endif
       fp16_enable_ = false;
+      bf16_enable_ = false;
       std::string message = "[TensorRT EP] ORT_TENSORRT_FP16_ENABLE or ORT_TENSORRT_BF16_ENABLE is set, but platform doesn't support fast native fp16/bf16";
       Ort::ThrowOnError(ep->ort_api.Logger_LogMessage(&ep->logger_,
                                                       OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING,
@@ -1371,6 +1532,16 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
                                                     OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE,
                                                     message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
   }
+
+  if (bf16_enable_) {
+    trt_config->setFlag(nvinfer1::BuilderFlag::kBF16);
+    trt_node_name_with_precision += "_bf16";
+    std::string message = "[TensorRT EP] BF16 mode is enabled";
+    Ort::ThrowOnError(ep->ort_api.Logger_LogMessage(&ep->logger_,
+                                                    OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE,
+                                                    message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
+  }
+
   if (int8_enable_) {
     trt_config->setFlag(nvinfer1::BuilderFlag::kINT8);
     trt_node_name_with_precision += "_int8";
@@ -1834,7 +2005,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
   profiles_.emplace(fused_node_name, std::move(trt_profiles));
 
   // Create EP Context nodes
-  std::unique_ptr<EPContextNodeHelper> ep_ctx_node_helper = std::make_unique<EPContextNodeHelper>(*ep, graph, fused_node);
+  std::unique_ptr<EPContextNodeHelper> ep_ctx_node_helper = std::make_unique<EPContextNodeHelper>(*ep, topo_sorted_graph, fused_node);
   if (dump_ep_context_model_) {
     std::string compute_capability_hw_compat = compute_capability_;
     if (engine_cache_enable_ && engine_hw_compatible_) {
@@ -1883,6 +2054,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
       &tensorrt_mu_,
       compute_capability_,
       max_workspace_size_,
+      bf16_enable_,
       fp16_enable_,
       int8_enable_,
       int8_calibration_cache_available_,
@@ -2496,6 +2668,7 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
     max_workspace_size_ = info_.max_workspace_size;
     fp16_enable_ = info_.fp16_enable;
     int8_enable_ = info_.int8_enable;
+    bf16_enable_ = info_.bf16_enable;
     if (int8_enable_) {
       int8_calibration_cache_name_ = info_.int8_calibration_table_name;
       int8_use_native_tensorrt_calibration_table_ = info_.int8_use_native_calibration_table;
@@ -2537,7 +2710,7 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
     }
     force_sequential_engine_build_ = info_.force_sequential_engine_build;
     context_memory_sharing_enable_ = info_.context_memory_sharing_enable;
-    if (fp16_enable_) {
+    if (fp16_enable_ || bf16_enable_) {
       layer_norm_fp32_fallback_ = info_.layer_norm_fp32_fallback;
     }
     build_heuristics_enable_ = info_.build_heuristics_enable;
@@ -3061,6 +3234,13 @@ OrtStatus* TRTEpNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_ptr, void*
     if (trt_state->fp16_enable) {
       trt_config->setFlag(nvinfer1::BuilderFlag::kFP16);
       std::string message = "[TensorRT EP] FP16 mode is enabled";
+      Ort::ThrowOnError(ep.ort_api.Logger_LogMessage(&ep.logger_,
+                                                     OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE,
+                                                     message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
+    }
+    if (trt_state->bf16_enable) {
+      trt_config->setFlag(nvinfer1::BuilderFlag::kBF16);
+      std::string message = "[TensorRT EP] BF16 mode is enabled";
       Ort::ThrowOnError(ep.ort_api.Logger_LogMessage(&ep.logger_,
                                                      OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE,
                                                      message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));

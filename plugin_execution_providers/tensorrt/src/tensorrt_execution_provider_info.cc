@@ -18,6 +18,7 @@ constexpr const char* kMinSubgraphSize = "trt_min_subgraph_size";
 constexpr const char* kMaxWorkspaceSize = "trt_max_workspace_size";
 constexpr const char* kFp16Enable = "trt_fp16_enable";
 constexpr const char* kInt8Enable = "trt_int8_enable";
+constexpr const char* kBf16Enable = "trt_bf16_enable";
 constexpr const char* kInt8CalibTable = "trt_int8_calibration_table_name";
 constexpr const char* kInt8UseNativeCalibTable = "trt_int8_use_native_calibration_table";
 constexpr const char* kDLAEnable = "trt_dla_enable";
@@ -95,6 +96,7 @@ TensorrtExecutionProviderInfo TensorrtExecutionProviderInfo::FromProviderOptions
           .AddAssignmentToReference(tensorrt::provider_option_names::kMaxWorkspaceSize, info.max_workspace_size)
           .AddAssignmentToReference(tensorrt::provider_option_names::kFp16Enable, info.fp16_enable)
           .AddAssignmentToReference(tensorrt::provider_option_names::kInt8Enable, info.int8_enable)
+          .AddAssignmentToReference(tensorrt::provider_option_names::kBf16Enable, info.bf16_enable)
           .AddAssignmentToReference(tensorrt::provider_option_names::kInt8CalibTable, info.int8_calibration_table_name)
           .AddAssignmentToReference(tensorrt::provider_option_names::kInt8UseNativeCalibTable, info.int8_use_native_calibration_table)
           .AddAssignmentToReference(tensorrt::provider_option_names::kDLAEnable, info.dla_enable)
