@@ -828,10 +828,6 @@ SubGraphCollection_t TensorrtExecutionProvider::GetSupportedList(SubGraphCollect
   Ort::Status status(KahnsTopologicalSort(
       *ort_graph,
       [&](const OrtNode* node) {
-        size_t node_id = 0;
-        Ort::Status status(Ort::GetApi().Node_GetId(node, &node_id));
-        ENFORCE(status.IsOK());
-
         topo_sorted_nodes.push_back(Ort::ConstNode(node));
       },
       PriorityNodeCompare()));
@@ -937,10 +933,6 @@ SubGraphCollection_t TensorrtExecutionProvider::GetSupportedList(SubGraphCollect
         Ort::Status status(KahnsTopologicalSort(
             *sub_graph,
             [&](const OrtNode* node) {
-              size_t node_id = 0;
-              Ort::Status status(Ort::GetApi().Node_GetId(node, &node_id));
-              ENFORCE(status.IsOK());
-
               sub_graph_topo_sorted_nodes.push_back(Ort::ConstNode(node));
             },
             PriorityNodeCompare()));
@@ -982,10 +974,6 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
   RETURN_IF_ERROR(KahnsTopologicalSort(
       *ort_graph,
       [&](const OrtNode* node) {
-        size_t node_id = 0;
-        Ort::Status status(Ort::GetApi().Node_GetId(node, &node_id));
-        ENFORCE(status.IsOK());
-
         topo_sorted_nodes.push_back(Ort::ConstNode(node));
       },
       PriorityNodeCompare()));
@@ -1237,10 +1225,6 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
   Ort::Status status(KahnsTopologicalSort(
       *ort_graph,
       [&](const OrtNode* node) {
-        size_t node_id = 0;
-        Ort::Status status(Ort::GetApi().Node_GetId(node, &node_id));
-        ENFORCE(status.IsOK());
-
         topo_sorted_nodes.push_back(Ort::ConstNode(node));
       },
       PriorityNodeCompare()));
