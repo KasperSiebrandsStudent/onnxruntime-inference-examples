@@ -55,9 +55,6 @@ AllocatorUniquePtr<T> MakeUniquePtrFromOrtAllocator(OrtAllocator* ort_allocator,
   return AllocatorUniquePtr<T>{p, [ort_allocator](T* p) { ort_allocator->Free(ort_allocator, p); }};
 }
 
-// Following helper functions/struct, GetNodeInputEdgeCount, GetOutputNodes, KahnsTopologicalSort, VisitorPriorityQueue, PriorityNodeCompare are added but are not used for now.
-// TODO: They will be used for graph partition in the following PR.
-
 template <typename T>
 struct VisitorPriorityQueue {
   using ComparatorType = std::function<bool(T, T)>;
